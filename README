@@ -226,7 +226,7 @@ megatools@megous.com. The main GIT repository is available at:
 
 In addition to the regular build steps, you'll need to install additional
 dependencies. For building from git repository, you'll also need: asciidoc,
-docbook-xml, autoconf, libtool, automake.
+docbook-xml, autoconf, libtool, automake, xsltproc, libfuse-dev.
 
 Now, get the code using git:
 

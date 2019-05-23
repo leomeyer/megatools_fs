@@ -21,6 +21,7 @@ AM_PROG_LIBTOOL
 GLIB_VERSION="2.32.0"
 LIBCURL_REQUIRES="libcurl"
 OPENSSL_REQUIRES="openssl"
+FUSE_REQUIRES="fuse"
 
 # check for glib/gio
 PKG_CHECK_MODULES(GLIB, [gio-2.0 >= $GLIB_VERSION])
@@ -36,6 +37,11 @@ AC_SUBST(OPENSSL_LIBS)
 PKG_CHECK_MODULES(LIBCURL, [$LIBCURL_REQUIRES])
 AC_SUBST(LIBCURL_CFLAGS)
 AC_SUBST(LIBCURL_LIBS)
+
+# check fuse
+PKG_CHECK_MODULES(FUSE, [$FUSE_REQUIRES])
+AC_SUBST(FUSE_CFLAGS)
+AC_SUBST(FUSE_LIBS)
 
 # enable compatibility symlinks
 AC_ARG_ENABLE([compat-symlinks], AC_HELP_STRING([--enable-compat-symlinks], [Install symlinks for compatibility with old megatools commands (megals, megacopy, megadl, ...).]))

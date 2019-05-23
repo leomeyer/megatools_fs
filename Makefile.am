@@ -1,6 +1,6 @@
 # global flags
 
-COMMANDS = df dl get ls test export mkdir put reg rm copy sync
+COMMANDS = df dl get ls test export mkdir put reg rm copy sync fs
 
 ACLOCAL_AMFLAGS = -I m4
 
@@ -8,6 +8,7 @@ AM_CFLAGS = \
 	$(GLIB_CFLAGS) \
 	$(OPENSSL_CFLAGS) \
 	$(LIBCURL_CFLAGS) \
+	$(FUSE_CFLAGS) \
 	-DG_LOG_DOMAIN=\"Mega\" \
 	-I$(srcdir)/lib \
 	-I$(srcdir) \
@@ -16,7 +17,8 @@ AM_CFLAGS = \
 LDADD = \
 	$(GLIB_LIBS) \
 	$(OPENSSL_LIBS) \
-	$(LIBCURL_LIBS)
+	$(LIBCURL_LIBS) \
+    $(FUSE_LIBS)
 
 # tools
 
@@ -46,6 +48,7 @@ megatools_SOURCES = \
 	tools/reg.c \
 	tools/rm.c \
 	tools/sync.c \
+	tools/fs.c \
 	tools/copy.c \
 	tools/shell.c \
 	tools/shell.h
