@@ -2435,6 +2435,13 @@ const gchar *mega_session_get_sid(struct mega_session *s)
 }
 
 // }}}
+// {{{ mega_session_get_user_name
+
+const gchar* mega_session_get_user_name(struct mega_session *s)
+{
+    return s->user_name;
+}
+// }}}
 // {{{ mega_session_get_user
 
 gboolean mega_session_get_user(struct mega_session *s, GError **err)

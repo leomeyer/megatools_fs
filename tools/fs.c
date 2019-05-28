@@ -9,35 +9,110 @@
 #include "tools.h"
 #include "shell.h"
 
+#define TOOL_NAME   megatools fs
+
+static gchar *opt_mountpoint;
 static gchar *opt_mountoptions;
-static gboolean opt_quiet;
+static gboolean opt_log_unimplemented;
+static gchar *opt_tempbase;
+static gchar *temp_folder_path;
+static GFile *temp_folder;
 
 static struct mega_session *s;
 
+#define Q(x) #x
+#define QUOTE(x) Q(x)
+
+// append multiple -o or --options values, separated by comma
+static gboolean opt_mountoptions_callback(const gchar *option_name, const gchar *value, gpointer data, GError **error)
+{
+  if (value) {
+    if (!opt_mountoptions)
+      opt_mountoptions = g_strdup(value);
+    else
+      opt_mountoptions = g_strconcat(opt_mountoptions, 
+                          (strlen(opt_mountoptions) > 0 ? "," : ""), value, NULL);
+
+  	return TRUE;
+	}
+
+  return FALSE;
+}
+
 static GOptionEntry entries[] = {
-	{ "options", 'o', 0, G_OPTION_ARG_STRING, &opt_mountoptions, "FUSE mount options", "options" },
-	{ "quiet", 'q', 0, G_OPTION_ARG_NONE, &opt_quiet, "Output warnings and errors only", NULL },
-	{ NULL }
+	{ "options", 'o', 0, G_OPTION_ARG_CALLBACK, opt_mountoptions_callback, "FUSE mount options", "<options>" },
+	{ "tempdir", 't', 0, G_OPTION_ARG_STRING, &opt_tempbase, "Temporary folder", "<folder>" },
+	{ "log-unimplemented", 'u', G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE, &opt_log_unimplemented, "Log unimplemented FUSE function calls in syslog", NULL },
+	{ NULL },
 };
+
+// {{{ Initialization and destruction
+
+static void *mega_init(struct fuse_conn_info *conn)
+{
+  GError *local_err = NULL;
+
+  if (mega_debug & MEGA_DEBUG_APP)
+    syslog(LOG_INFO, QUOTE(TOOL_NAME) ": Initializing remote file system for mega user '%s' at mountpoint %s", mega_session_get_user_name(s), opt_mountpoint);
+
+  gc_free gchar* lock_file_path = g_strconcat(temp_folder_path, "/.lock", NULL);
+  gc_object_unref GFile *lock_file = g_file_new_for_path(lock_file_path);
+
+  // create the lock file and write the current process ID to it
+  gc_object_unref GFileOutputStream *fos = g_file_create(lock_file, G_FILE_CREATE_NONE, NULL, &local_err);
+  if (!fos) {
+    syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Can't create lock file %s: %s\n", lock_file_path, local_err->message);
+    g_clear_error(&local_err);
+    exit(local_err->code);
+    return NULL;
+  }
+
+  gsize bytes_written;
+  if (!g_output_stream_printf((GOutputStream*)fos, &bytes_written, NULL, &local_err, "%d", getpid())) {
+    syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Can't write to lock file %s: %s\n", lock_file_path, local_err->message);
+    g_clear_error(&local_err);
+    exit(local_err->code);
+    return NULL;
+  }
+
+  if (!g_output_stream_close((GOutputStream*)fos, NULL, &local_err)) {
+    syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Error closing lock file %s: %s\n", lock_file_path, local_err->message);
+    g_clear_error(&local_err);
+    exit(local_err->code);
+    return NULL;
+  }
+
+  return NULL;
+}
+
+static void mega_destroy(void *private_data)
+{
+  GError *local_err = NULL;
+
+  if (mega_debug & MEGA_DEBUG_APP)
+    syslog(LOG_INFO, QUOTE(TOOL_NAME) ": Taking down remote file system for mega user '%s' at mountpoint %s", mega_session_get_user_name(s), opt_mountpoint);
+
+  gc_free gchar* lock_file_path = g_strconcat(temp_folder_path, "/.lock", NULL);
+  gc_object_unref GFile *lock_file = g_file_new_for_path(lock_file_path);
+
+  // delete the lock file
+  if (!g_file_delete(lock_file, NULL, &local_err)) {
+    syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Can't delete lock file %s: %s\n", lock_file_path, local_err->message);
+    g_clear_error(&local_err);
+  }
+}
+
+// }}}
 
 // {{{ Read file/dir attributes
 
 static int mega_getattr(const char *path, struct stat *stbuf)
 {
-  syslog(LOG_INFO, "Call to mega_getattr: file %s", path);
-
   memset(stbuf, 0, sizeof(struct stat));
-/*
-  char *source = "/home/leo/megatools/mount/Root/Leo";
-  char *fullpath_source = NULL;
-	
-    fullpath_source = realpath(source, NULL);
-    if (!fullpath_source) {
-	    syslog(LOG_ERR, "could not resolve full path for source %s [%d]",
-		    source, -errno);
-    }
-*/
-  //stbuf->st_uid = geteuid();
+
+  // set owner and group to the user who started the tool
+  stbuf->st_uid = geteuid();
+  stbuf->st_gid = getegid();
 
   if (strcmp(path, "/") == 0) 
   {
@@ -51,7 +126,7 @@ static int mega_getattr(const char *path, struct stat *stbuf)
 
     if (n)
     {
-      stbuf->st_mode = n->type == MEGA_NODE_FILE ? S_IFREG | 0644 : S_IFDIR | 0755;
+      stbuf->st_mode = n->type == MEGA_NODE_FILE ? S_IFREG | 0444 : S_IFDIR | 0755;
       stbuf->st_nlink = 1;
       stbuf->st_size = n->size;
       stbuf->st_atime = stbuf->st_mtime = stbuf->st_ctime = n->timestamp;
@@ -64,8 +139,6 @@ static int mega_getattr(const char *path, struct stat *stbuf)
 
 static int mega_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi)
 {
-  syslog(LOG_INFO, "Call to mega_readdir: file %s", path);
-
   GSList* l = mega_session_ls(s, path, FALSE), *i;
 
   filler(buf, ".", NULL, 0);
@@ -80,7 +153,11 @@ static int mega_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
     st.st_mode = n->type == MEGA_NODE_FILE ? S_IFREG | 0644 : S_IFDIR | 0755;
     st.st_nlink = 1;
     st.st_size = n->size;
-    st.st_atime = st.st_mtime = st.st_ctime = n->timestamp;
+    // support local timestamp if available
+    if (n->local_ts > 0)
+      st.st_atime = st.st_mtime = st.st_ctime = n->local_ts;
+    else
+      st.st_atime = st.st_mtime = st.st_ctime = n->timestamp;
 
     if (filler(buf, n->name, &st, 0))
       break;
@@ -95,28 +172,16 @@ static int mega_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 
 static int mega_mkdir(const char *path, mode_t mode)
 {
-  GError *local_err = NULL;
-
-  if (!mega_session_mkdir(s, path, &local_err))
-  {
-    g_clear_error(&local_err);
-    return -ENOENT;
-  }
-
-  return 0;
+  if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_mkdir: file %s", path);
+  return -ENOTSUP;
 }
 
 static int mega_rmdir(const char *path)
 {
-  GError *local_err = NULL;
-
-  if (!mega_session_rm(s, path, &local_err))
-  {
-    g_clear_error(&local_err);
-    return -ENOENT;
-  }
-
-  return 0;
+  if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_rmdir: file %s", path);
+  return -ENOTSUP;
 }
 
 // }}}
@@ -124,19 +189,22 @@ static int mega_rmdir(const char *path)
 
 static int mega_symlink(const char *from, const char *to)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_symlink: file %s", from);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_symlink: file %s", from);
   return -ENOTSUP;
 }
 
 static int mega_readlink(const char *path, char *buf, size_t size)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_readlink: file %s", path);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_readlink: file %s", path);
   return -ENOTSUP;
 }
 
 static int mega_link(const char *from, const char *to)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_link: file %s", from);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_link: file %s", from);
   return -ENOTSUP;
 }
 
@@ -145,15 +213,9 @@ static int mega_link(const char *from, const char *to)
 
 static int mega_unlink(const char *path)
 {
-  GError *local_err = NULL;
-
-  if (!mega_session_rm(s, path, &local_err))
-  {
-    g_clear_error(&local_err);
-    return -ENOENT;
-  }
-
-  return 0;
+  if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_unlink: file %s", path);
+  return -ENOTSUP;
 }
 
 // }}}
@@ -161,7 +223,8 @@ static int mega_unlink(const char *path)
 
 static int mega_rename(const char *from, const char *to)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_rename: file %s", from);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_rename: file %s", from);
   return -ENOTSUP;
 }
 
@@ -170,38 +233,41 @@ static int mega_rename(const char *from, const char *to)
 
 static int mega_truncate(const char *path, off_t size)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_truncate: file %s", path);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_truncate: file %s", path);
   return -ENOTSUP;
 }
 
+/*
+// open should not be implemented by this file system because it needs
+// to be handled by the kernel.
 static int mega_open(const char *path, struct fuse_file_info *fi)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_open: handle %ld", fi->fh);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_open: handle %ld", fi->fh);
   return -ENOTSUP;
 }
+*/
 
 static int mega_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_read: file %s", path);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_read: file %s", path);
   return -ENOTSUP;
 }
 
 static int mega_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_write: file %s", path);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_write: file %s", path);
   return -ENOTSUP;
 }
 
 static int mega_release(const char *path, struct fuse_file_info *fi)
 {
-  syslog(LOG_ERR, "Call to unimplemented mega_release: file %s", path);
+   if (opt_log_unimplemented)
+    syslog(LOG_INFO, "Call to unimplemented mega_release: file %s", path);
   return 0;
-}
-
-static void *mega_init(struct fuse_conn_info *conn)
-{
-  syslog(LOG_ERR, "Call to unimplemented mega_init");
-  return NULL;
 }
 
 // }}}
@@ -216,7 +282,8 @@ static void *mega_init(struct fuse_conn_info *conn)
 #define UNIMPLEMENTED(rettype, fn, ...) \
 static rettype CONCAT(mega_, fn) (__VA_ARGS__) \
 { \
-  syslog(LOG_ERR, "Call to unimplemented function " #fn); \
+   if (opt_log_unimplemented) \
+    syslog(LOG_INFO, "Call to unimplemented function " #fn); \
   RETVAL(rettype) \
 }
 
@@ -245,8 +312,6 @@ UNIMPLEMENTED(int, removexattr, const char * c, const char * c1)
 UNIMPLEMENTED(int, releasedir, const char * c, struct fuse_file_info *fi)
  
 UNIMPLEMENTED(int, fsyncdir, const char * c, int i, struct fuse_file_info *fi)
- 
-UNIMPLEMENTED(void, destroy, void *private_data)
  
 UNIMPLEMENTED(int, access, const char * c, int i)
  
@@ -321,9 +386,8 @@ static struct fuse_operations mega_oper = {
 int fs_main(int ac, char* av[])
 {
   GError *local_err = NULL;
+  GFileType file_type;
 
-  // tool_allow_unknown_options = TRUE;
-  
   tool_init(&ac, &av, "mount_directory - mount files stored at mega.nz", entries,
 		  TOOL_INIT_AUTH);
 
@@ -336,18 +400,114 @@ int fs_main(int ac, char* av[])
   if (!s)
     return 1;
 
-  // pass mount options as arguments to fuse_main
-  char** mountoptions = av;
-  if (opt_mountoptions) {
-    ac += 2;
-    mountoptions = malloc(ac * sizeof(char*));
-    for (int i = 0; i < ac - 2; i++)
-      mountoptions[i] = av[i];
-    mountoptions[ac - 2] = "-o";
-    mountoptions[ac - 1] = opt_mountoptions;
+  opt_mountpoint = g_strdup(av[1]);
+
+  // temporary directory
+  if (!opt_tempbase)
+    opt_tempbase = "/tmp";
+
+  // check that temporary folder exists and is a writable directory
+  gc_free gchar *tempbase_path = g_strconcat(opt_tempbase, "/", "megatools", NULL);
+  gc_object_unref GFile *tempbase_folder = g_file_new_for_path(tempbase_path);
+  file_type = g_file_query_file_type(tempbase_folder, G_FILE_QUERY_INFO_NONE, NULL);
+
+  if (file_type == G_FILE_TYPE_UNKNOWN) {
+    // create temporary base directory
+    if (!g_file_make_directory(tempbase_folder, NULL, &local_err)) {
+      g_printerr("ERROR: Can't create temporary directory %s: %s\n", tempbase_path,
+           local_err->message);
+      g_clear_error(&local_err);
+      return FALSE;
+    }
+  } else if (file_type != G_FILE_TYPE_DIRECTORY) {
+      g_printerr("ERROR: Temporary file location %s exists but is not a directory\n", tempbase_path);
+      return FALSE;
   }
 
-  int rs = fuse_main(ac, mountoptions, &mega_oper, NULL);
+  // check login-specific temporary folder
+  gc_free gchar *temp_path = g_strconcat(tempbase_path, "/", mega_session_get_user_name(s), NULL);
+  gc_object_unref GFile *temp_folder = g_file_new_for_path(temp_path);
+  file_type = g_file_query_file_type(temp_folder, G_FILE_QUERY_INFO_NONE, NULL);
+
+  if (file_type == G_FILE_TYPE_UNKNOWN) {
+    // create temporary base directory
+    if (!g_file_make_directory(temp_folder, NULL, &local_err)) {
+      g_printerr("ERROR: Can't create temporary directory %s: %s\n", temp_path,
+           local_err->message);
+      g_clear_error(&local_err);
+      return FALSE;
+    }
+  } else if (file_type != G_FILE_TYPE_DIRECTORY) {
+      g_printerr("ERROR: Temporary file location %s exists but is not a directory\n", temp_path);
+      return FALSE;
+  }
+
+  gc_free gchar* lock_file_path = g_strconcat(temp_path, "/.lock", NULL);
+  gc_object_unref GFile *lock_file = g_file_new_for_path(lock_file_path);
+
+  // check the lock file
+  if (g_file_query_exists(lock_file, NULL)) {
+    // read lock file
+    gc_free gchar *lock_data;
+    gsize length;
+    if (!g_file_get_contents(lock_file_path, &lock_data, &length, &local_err)) {
+      g_printerr("ERROR: Unable to read lock file %s: %s\n", lock_file_path, local_err->message);
+      g_clear_error(&local_err);
+      return 1;
+    }
+
+    // parse lock file content to process ID
+    errno = 0;
+    gchar *error_location;
+    long int procID = strtol(lock_data, &error_location, 10);
+    if (errno != 0 || error_location[0] != '\0') {
+      g_printerr("ERROR: Unable to parse lock file data: %s\n", lock_file_path);
+      return 1;
+    }
+    
+    // check whether the process is still running
+    gc_free gchar *process_path = g_strconcat("/proc/", lock_data, "/cmdline", NULL);
+    gc_object_unref GFile *process_file = g_file_new_for_path(process_path);
+    if (g_file_query_exists(process_file, NULL)) {
+      // TODO check whether the process is a megatools-fs process?
+      g_printerr("ERROR: The process with ID %s is locking the temporary folder %s\n", lock_data, temp_path);
+      return 1; 
+    }
+
+    // delete the lock file
+    if (!g_file_delete(lock_file, NULL, &local_err)) {
+      g_printerr("ERROR: Can't delete obsolete lock file %s: %s\n", lock_file_path, local_err->message);
+      g_clear_error(&local_err);
+      return 1; 
+    }
+  }
+
+  // create the lock file and delete it again to check whether we can write to the tmpdir
+  gc_object_unref GFileOutputStream *fos = g_file_create(lock_file, G_FILE_CREATE_NONE, NULL, &local_err);
+  if (!fos) {
+    g_printerr("ERROR: Can't create lock file %s: %s\n", lock_file_path, local_err->message);
+    g_clear_error(&local_err);
+    return 1; 
+  }
+
+  // delete the lock file
+  if (!g_file_delete(lock_file, NULL, &local_err)) {
+    g_printerr("ERROR: Can't delete lock file %s: %s\n", lock_file_path, local_err->message);
+    g_clear_error(&local_err);
+    return 1; 
+  }
+
+  temp_folder_path = g_strdup(temp_path);
+
+  // pass mount options as argument to fuse_main
+  struct fuse_args args = FUSE_ARGS_INIT(ac, av);
+  fuse_opt_parse(&args, NULL, NULL, NULL);
+  // add default mount options
+#define DEFAULT_MOUNTOPTIONS "ro,default_permissions,fsname=mega_fs,auto_unmount"
+  gchar *mountoptions = g_strconcat("-o" DEFAULT_MOUNTOPTIONS, (opt_mountoptions ? "," : ""), opt_mountoptions, NULL);
+  fuse_opt_add_arg(&args, mountoptions);
+
+  int rs = fuse_main(args.argc, args.argv, &mega_oper, NULL);
 
   tool_fini(s);
   return rs;

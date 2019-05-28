@@ -153,6 +153,7 @@ gboolean mega_session_save(struct mega_session *s, GError **err);
 // this has side effect of the current session being closed
 gboolean mega_session_load(struct mega_session *s, const gchar *un, const gchar *pw, gint max_age, gchar **last_sid,
 			   GError **err);
+const gchar* mega_session_get_user_name(struct mega_session *s);
 
 gboolean mega_session_get_user(struct mega_session *s, GError **err);
 gboolean mega_session_refresh(struct mega_session *s, GError **err);
