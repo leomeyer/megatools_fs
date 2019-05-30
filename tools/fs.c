@@ -1,14 +1,20 @@
 
 #define FUSE_USE_VERSION 26
 #define _DEFAULT_SOURCE
+// necessary for Raspbian build
+#define _BSD_SOURCE
+// necessary for pread
+#define _XOPEN_SOURCE 500
+
+#include "tools.h"
+#include "shell.h"
 
 #include <fuse.h>
+#include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <syslog.h>
-#include "tools.h"
-#include "shell.h"
 
 #define TOOL_NAME   	fs
 #define LOCKFILE_NAME 	".lock"
@@ -285,7 +291,7 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
         }
     } else {
 		// compare size
-        syslog(LOG_INFO, "Comparing sizes: %lu (local) vs. %lu (remote)", st.st_size, n->size);
+        syslog(LOG_INFO, "Comparing sizes: %llu (local) vs. %llu (remote)", st.st_size, n->size);
 		gboolean do_replace = (st.st_size != n->size);
 
 		if (!do_replace) {
@@ -296,7 +302,7 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
 
 		if (do_replace) {
             syslog(LOG_INFO, "Deleting: %s", real_path);
-/*            
+/*
             // this code introduces a delay of 50 seconds if fuse_main is run without option "debug"
 			if (!g_file_delete(real_file, NULL, &local_err)) {
 				syslog(LOG_ERR, "Can't delete temporary file %s: %s", real_path, local_err->message);
@@ -338,7 +344,7 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
             syslog(LOG_ERR, "Error in statvfs: %d", errno);
             return -EIO;
         }
-        
+
         long int free_bytes = stfs.f_bavail * stfs.f_bsize;
         syslog(LOG_INFO, "Available space in temporary folder: %lu bytes", free_bytes);
 
@@ -348,7 +354,7 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
             return -ENOSPC;
         }
 
-        syslog(LOG_INFO, "Downloading: %s (%lu bytes)", path, n->size);
+        syslog(LOG_INFO, "Downloading: %s (%llu bytes)", path, n->size);
         if (!mega_session_get_compat(s, real_path, path, &local_err)) {
             syslog(LOG_ERR, "Download failed for %s: %s", path, local_err->message);
             int code = local_err->code;
@@ -411,7 +417,7 @@ static int mega_read_buf(const char * path, struct fuse_bufvec **bufp, size_t si
     }
 
     *bufp = src;
-    
+
     return retstat;
 }
 */
@@ -419,17 +425,17 @@ static int mega_read_buf(const char * path, struct fuse_bufvec **bufp, size_t si
 static int mega_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
 	if (mega_debug & MEGA_DEBUG_APP)
-		syslog(LOG_INFO, "mega_read: file %s at offset %lu (size %ld)", path, offset, size);
+		syslog(LOG_INFO, "mega_read: file %s at offset %llu (size %zu)", path, offset, size);
 
     int retstat = 0;
-    
+
     retstat = pread(fi->fh, buf, size, offset);
     if (retstat < 0) {
         gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
         syslog(LOG_ERR, "Unable to read file %s: %s", real_path, g_strerror(errno));
         return -errno;
     }
-    
+
     return retstat;
 }
 /*
