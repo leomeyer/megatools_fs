@@ -45,7 +45,7 @@ static gboolean opt_mountoptions_callback(const gchar *option_name, const gchar 
 static GOptionEntry entries[] = {
 	{ "options", 'o', 0, G_OPTION_ARG_CALLBACK, opt_mountoptions_callback, "FUSE mount options", "<options>" },
 	{ "tempdir", 't', 0, G_OPTION_ARG_STRING, &opt_tempbase, "Temporary folder", "<folder>" },
-	{ "log-unimplemented", 'u', G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE, &opt_log_unimplemented, "Log unimplemented FUSE function calls in syslog", NULL },
+	{ "log-unimplemented", 'l', 0, G_OPTION_ARG_NONE, &opt_log_unimplemented, "Log unimplemented FUSE function calls in syslog", NULL },
 	{ NULL },
 };
 
@@ -183,7 +183,7 @@ static int mega_releasedir(const char * c, struct fuse_file_info *fi) {
 
 // }}}
 // {{{ Create/remove directories
-
+/*
 static int mega_mkdir(const char *path, mode_t mode)
 {
 	if (opt_log_unimplemented)
@@ -251,6 +251,7 @@ static int mega_truncate(const char *path, off_t size)
 		syslog(LOG_INFO, "Call to unimplemented function truncate: file %s", path);
 	return -ENOTSUP;
 }
+*/
 
 static int mega_open(const char *path, struct fuse_file_info *fi)
 {
@@ -269,67 +270,184 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
 	if (!n)
 		return -ENOENT;
 
+    syslog(LOG_INFO, "Node found");
+
+    // get effective timestamp
+    long int timestamp = (n->local_ts > 0 ? n->local_ts : n->timestamp);
+
 	gc_object_unref GFile* real_file = g_file_new_for_path(real_path);
 	// get temporary file information
 	GStatBuf st;
-	if (!g_stat(real_path, &st)) {
+	if (g_stat(real_path, &st) != 0) {
+        if (errno != ENOENT) {
+            syslog(LOG_ERR, "Failed to stat: %s: %s", real_path, g_strerror(errno));
+            return -errno;
+        }
+    } else {
 		// compare size
+        syslog(LOG_INFO, "Comparing sizes: %lu (local) vs. %lu (remote)", st.st_size, n->size);
 		gboolean do_replace = (st.st_size != n->size);
 
 		if (!do_replace) {
 			// compare timestamp
-			long int timestamp = (n->local_ts > 0 ? n->local_ts : n->timestamp);
-			do_replace = (timestamp != st.st_atime);
+            syslog(LOG_INFO, "Comparing timestamps: %lu (local) vs. %lu (remote)", st.st_mtime, timestamp);
+			do_replace = (timestamp != st.st_mtime);
 		}
 
 		if (do_replace) {
-			if (g_file_delete(real_file, NULL, &local_err)) {
+            syslog(LOG_INFO, "Deleting: %s", real_path);
+/*            
+            // this code introduces a delay of 50 seconds if fuse_main is run without option "debug"
+			if (!g_file_delete(real_file, NULL, &local_err)) {
 				syslog(LOG_ERR, "Can't delete temporary file %s: %s", real_path, local_err->message);
 				int code = local_err->code;
 				g_clear_error(&local_err);
 				return -1 * code;
-			}
+*/
+            if (unlink(real_path) != 0) {
+                syslog(LOG_ERR, "Can't delete temporary file %s: %s", real_path, g_strerror(errno));
+                int code = errno;
+                return -1 * code;
+            } else {
+                syslog(LOG_INFO, "Successfully deleted: %s", real_path);
+            }
 		}
 	}
 
+    syslog(LOG_INFO, "Checking file existence: %s", real_path);
+
 	// does the file not yet exist?
 	if (!g_file_query_exists(real_file, NULL)) {
+        // ensure that the path exists
+        syslog(LOG_INFO, "Checking/creating folder for: %s", real_path);
+        gc_object_unref GFile *real_folder = g_file_get_parent(real_file);
+        if (!g_file_make_directory_with_parents(real_folder, NULL, &local_err) && local_err->code != G_IO_ERROR_EXISTS) {
+            syslog(LOG_ERR, "Can't create target directory of %s: %s", real_path, local_err->message);
+            int code = local_err->code;
+            g_clear_error(&local_err);
+            return -1 * code;
+        }
+        g_clear_error(&local_err);
 
+        // need to download the file
 
-	}
+        syslog(LOG_INFO, "Checking space on temporary file system: %s", temp_folder_path);
+        // check space on temp folder fs
+        struct statvfs stfs;
+        if (statvfs(temp_folder_path, &stfs) != 0) {
+            syslog(LOG_ERR, "Error in statvfs: %d", errno);
+            return -EIO;
+        }
+        
+        long int free_bytes = stfs.f_bavail * stfs.f_bsize;
+        syslog(LOG_INFO, "Available space in temporary folder: %lu bytes", free_bytes);
 
-	syslog(LOG_INFO, "Temp path: %s", temp_folder_path);
-	struct statvfs stfs;
-	if (statvfs(temp_folder_path, &stfs) != 0) {
-		syslog(LOG_ERR, "Error in statvfs: %d", errno);
-		return -EIO;
-	}
-		
-	syslog(LOG_INFO, "Available space in temporary folder: %lu bytes", stfs.f_bavail * stfs.f_bsize);
+        if (free_bytes < n->size) {
+            long int diff = n->size - free_bytes;
+            syslog(LOG_ERR, "Not enough space in temp folder %s for %s, %lu bytes short", temp_folder_path, path, diff);
+            return -ENOSPC;
+        }
 
-	return -EIO;
+        syslog(LOG_INFO, "Downloading: %s (%lu bytes)", path, n->size);
+        if (!mega_session_get_compat(s, real_path, path, &local_err)) {
+            syslog(LOG_ERR, "Download failed for %s: %s", path, local_err->message);
+            int code = local_err->code;
+            g_clear_error(&local_err);
+            return -1 * code;
+        }
+
+        // set timestamp
+        if (timestamp > 0) {
+            struct utimbuf timbuf;
+            timbuf.actime = timestamp;
+            timbuf.modtime = timestamp;
+            if (utime(real_path, &timbuf)) {
+                syslog(LOG_ERR, "Failed to set file times on %s: %s", real_path, g_strerror(errno));
+            }
+        }
+
+        syslog(LOG_INFO, "File successfully downloaded: %s", path);
+	} else {
+        syslog(LOG_INFO, "Opening file in temporary folder: %s", real_path);        
+    }
+
+    // open the file
+    int retstat = 0;
+    int fd;
+    
+    fd = open(real_path, fi->flags);
+    if (fd < 0) {
+        syslog(LOG_ERR, "Unable to open file %s: %s", real_path, g_strerror(errno));
+        retstat = errno;
+    } else {
+        fi->fh = fd;
+        syslog(LOG_INFO, "File handle %d created for: %s", fd, path);
+    }
+
+    return retstat;
 }
+/*
+static int mega_read_buf(const char * path, struct fuse_bufvec **bufp, size_t size, off_t offset, struct fuse_file_info *fi) {
+    if (mega_debug & MEGA_DEBUG_APP)
+        syslog(LOG_INFO, "mega_read_buf: file %s at offset %lu (size %ld)", path, offset, size);
 
+    struct fuse_bufvec *src;
+    src = malloc(sizeof(struct fuse_bufvec));
+    if (src == NULL)
+        return -ENOMEM;
+
+    *src = FUSE_BUFVEC_INIT(size);
+    src->buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+    src->buf[0].fd = fi->fh;
+    src->buf[0].pos = offset;
+
+    int retstat = 0;
+    
+    retstat = pread(fi->fh, src->buf, size, offset);
+    if (retstat < 0) {
+        retstat = -errno;
+        gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
+        syslog(LOG_ERR, "Unable to read file %s: %s", real_path, g_strerror(errno));
+    }
+
+    *bufp = src;
+    
+    return retstat;
+}
+*/
 
 static int mega_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
 	if (mega_debug & MEGA_DEBUG_APP)
 		syslog(LOG_INFO, "mega_read: file %s at offset %lu (size %ld)", path, offset, size);
-	return -ENOTSUP;
-}
 
+    int retstat = 0;
+    
+    retstat = pread(fi->fh, buf, size, offset);
+    if (retstat < 0) {
+        gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
+        syslog(LOG_ERR, "Unable to read file %s: %s", real_path, g_strerror(errno));
+        return -errno;
+    }
+    
+    return retstat;
+}
+/*
 static int mega_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
 	if (opt_log_unimplemented)
 		syslog(LOG_INFO, "Call to unimplemented function write: file %s", path);
 	return -ENOTSUP;
 }
-
+*/
 static int mega_release(const char *path, struct fuse_file_info *fi)
 {
-	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function release: file %s", path);
-	return 0;
+	if (mega_debug & MEGA_DEBUG_APP)
+		syslog(LOG_INFO, "mega_release: file %s", path);
+
+    close(fi->fh);
+
+	return -errno;
 }
 
 // }}}
@@ -348,16 +466,16 @@ static rettype CONCAT(mega_, fn) (__VA_ARGS__) \
 		syslog(LOG_INFO, "Call to unimplemented function " #fn); \
 	RETVAL(rettype) \
 }
-
+/*
 UNIMPLEMENTED(int, mknod, const char * c, mode_t m, dev_t d)
 
 UNIMPLEMENTED(int, chmod, const char * c, mode_t m)
 
 UNIMPLEMENTED(int, chown, const char * c, uid_t u, gid_t g)
 
-UNIMPLEMENTED(int, statfs, const char * c, struct statvfs *s)
+// UNIMPLEMENTED(int, statfs, const char * c, struct statvfs *s)
 
-UNIMPLEMENTED(int, flush, const char * c, struct fuse_file_info *fi)
+//UNIMPLEMENTED(int, flush, const char * c, struct fuse_file_info *fi)
 
 UNIMPLEMENTED(int, fsync, const char * c, int i, struct fuse_file_info *fi)
 
@@ -377,7 +495,7 @@ UNIMPLEMENTED(int, access, const char * c, int i)
  
 UNIMPLEMENTED(int, create, const char * c, mode_t m, struct fuse_file_info *fi)
  
-UNIMPLEMENTED(int, lock, const char * c, struct fuse_file_info *fi, int cmd, struct flock *fl)
+//UNIMPLEMENTED(int, lock, const char * c, struct fuse_file_info *fi, int cmd, struct flock *fl)
  
 UNIMPLEMENTED(int, utimens, const char * c, const struct timespec tv[2])
  
@@ -389,55 +507,53 @@ UNIMPLEMENTED(int, poll, const char * c, struct fuse_file_info *fi, struct fuse_
  
 UNIMPLEMENTED(int, write_buf, const char * c, struct fuse_bufvec *buf, off_t off, struct fuse_file_info *fi)
  
-UNIMPLEMENTED(int, read_buf, const char * c, struct fuse_bufvec **bufp, size_t size, off_t off, struct fuse_file_info *fi)
- 
 UNIMPLEMENTED(int, flock, const char * c, struct fuse_file_info *fi, int op)
  
 UNIMPLEMENTED(int, fallocate, const char * c, int i, off_t o1, off_t o2, struct fuse_file_info *fi)
  
 //UNIMPLEMENTED(ssize_t, copy_file_range, const char *path_in, struct fuse_file_info *fi_in, off_t offset_in, const char *path_out, struct fuse_file_info *fi_out, off_t offset_out, size_t size, int flags)
-
+*/
 static struct fuse_operations mega_oper = {
 	.getattr	= mega_getattr,
-	.readlink	= mega_readlink,
-	.mknod      = mega_mknod,
-	.mkdir		= mega_mkdir,
-	.unlink		= mega_unlink,
-	.rmdir		= mega_rmdir,
-	.symlink	= mega_symlink,
-	.rename		= mega_rename,
-	.link		= mega_link,
-	.chmod      = mega_chmod,
-	.chown      = mega_chown,
-	.truncate	= mega_truncate,
+//	.readlink	= mega_readlink,
+//	.mknod      = mega_mknod,
+//	.mkdir		= mega_mkdir,
+//	.unlink		= mega_unlink,
+//	.rmdir		= mega_rmdir,
+//	.symlink	= mega_symlink,
+//	.rename		= mega_rename,
+//	.link		= mega_link,
+//	.chmod      = mega_chmod,
+//	.chown      = mega_chown,
+//	.truncate	= mega_truncate,
 	.open		= mega_open,
 	.read		= mega_read,
-	.write		= mega_write,
-	.statfs     = mega_statfs,
-	.flush      = mega_flush,
+//	.write		= mega_write,
+//	.statfs     = mega_statfs,
+//	.flush      = mega_flush,
 	.release	= mega_release,
-	.fsync      = mega_fsync,
-	.setxattr   = mega_setxattr,
-	.getxattr   = mega_getxattr,
-	.listxattr  = mega_listxattr,
-	.removexattr = mega_removexattr,
+//	.fsync      = mega_fsync,
+//	.setxattr   = mega_setxattr,
+//	.getxattr   = mega_getxattr,
+//	.listxattr  = mega_listxattr,
+//	.removexattr = mega_removexattr,
 //    .opendir    = mega_opendir,
 	.readdir	= mega_readdir,
 //		.releasedir = mega_releasedir,
-	.fsyncdir   = mega_fsyncdir,
+//	.fsyncdir   = mega_fsyncdir,
 	.init       = mega_init,
 	.destroy    = mega_destroy,
-	.access     = mega_access,
-	.create     = mega_create,
-	.lock       = mega_lock,
-	.utimens    = mega_utimens,
-	.bmap       = mega_bmap,
-	.ioctl      = mega_ioctl,
-	.poll       = mega_poll,
-	.write_buf  = mega_write_buf,
-	.read_buf   = mega_read_buf,
-	.flock      = mega_flock,
-	.fallocate  = mega_fallocate,
+//	.access     = mega_access,
+//	.create     = mega_create,
+//	.lock       = mega_lock,
+//	.utimens    = mega_utimens,
+//	.bmap       = mega_bmap,
+//	.ioctl      = mega_ioctl,
+//	.poll       = mega_poll,
+//	.write_buf  = mega_write_buf,
+//	.read_buf   = mega_read_buf,
+//	.flock      = mega_flock,
+//	.fallocate  = mega_fallocate,
 };
 
 // }}}
@@ -574,7 +690,7 @@ int fs_main(int ac, char* av[])
 	fuse_opt_parse(&args, NULL, NULL, NULL);
 
 	// add default mount options
-#define DEFAULT_MOUNTOPTIONS "ro,default_permissions,fsname=mega_fs,auto_unmount"
+#define DEFAULT_MOUNTOPTIONS "ro,allow_root,default_permissions,fsname=mega_fs,auto_unmount"
 	gchar *mountoptions = g_strconcat("-o" DEFAULT_MOUNTOPTIONS, (opt_mountoptions ? "," : ""), opt_mountoptions, NULL);
 	fuse_opt_add_arg(&args, mountoptions);
 
