@@ -291,7 +291,7 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
         }
     } else {
 		// compare size
-        syslog(LOG_INFO, "Comparing sizes: %llu (local) vs. %llu (remote)", st.st_size, n->size);
+        syslog(LOG_INFO, "Comparing sizes: %zu (local) vs. %zu (remote)", st.st_size, n->size);
 		gboolean do_replace = (st.st_size != n->size);
 
 		if (!do_replace) {
@@ -354,7 +354,7 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
             return -ENOSPC;
         }
 
-        syslog(LOG_INFO, "Downloading: %s (%llu bytes)", path, n->size);
+        syslog(LOG_INFO, "Downloading: %s (%zu bytes)", path, n->size);
         if (!mega_session_get_compat(s, real_path, path, &local_err)) {
             syslog(LOG_ERR, "Download failed for %s: %s", path, local_err->message);
             int code = local_err->code;
@@ -425,7 +425,7 @@ static int mega_read_buf(const char * path, struct fuse_bufvec **bufp, size_t si
 static int mega_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
 	if (mega_debug & MEGA_DEBUG_APP)
-		syslog(LOG_INFO, "mega_read: file %s at offset %llu (size %zu)", path, offset, size);
+		syslog(LOG_INFO, "mega_read: file %s at offset %jd (size %zu)", path, offset, size);
 
     int retstat = 0;
 
