@@ -1,4 +1,3 @@
-
 #define FUSE_USE_VERSION 26
 #define _DEFAULT_SOURCE
 // necessary for Raspbian build
@@ -291,17 +290,17 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
         }
     } else {
 		// compare size
-        syslog(LOG_INFO, "Comparing sizes: %zu (local) vs. %zu (remote)", st.st_size, n->size);
+ 		syslog(LOG_INFO, "Comparing sizes: %zu (local) vs. %zu (remote)", (size_t)st.st_size, (size_t)n->size);
 		gboolean do_replace = (st.st_size != n->size);
 
 		if (!do_replace) {
 			// compare timestamp
-            syslog(LOG_INFO, "Comparing timestamps: %lu (local) vs. %lu (remote)", st.st_mtime, timestamp);
+			syslog(LOG_INFO, "Comparing timestamps: %lu (local) vs. %lu (remote)", st.st_mtime, timestamp);
 			do_replace = (timestamp != st.st_mtime);
 		}
 
 		if (do_replace) {
-            syslog(LOG_INFO, "Deleting: %s", real_path);
+			syslog(LOG_INFO, "Deleting: %s", real_path);
 /*
             // this code introduces a delay of 50 seconds if fuse_main is run without option "debug"
 			if (!g_file_delete(real_file, NULL, &local_err)) {
@@ -354,7 +353,7 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
             return -ENOSPC;
         }
 
-        syslog(LOG_INFO, "Downloading: %s (%zu bytes)", path, n->size);
+        syslog(LOG_INFO, "Downloading: %s (%zu bytes)", path, (size_t)n->size);
         if (!mega_session_get_compat(s, real_path, path, &local_err)) {
             syslog(LOG_ERR, "Download failed for %s: %s", path, local_err->message);
             int code = local_err->code;
