@@ -93,6 +93,7 @@ struct mega_node {
 	guint64 size;
 	glong timestamp;
 	glong local_ts;
+	gchar *xattrs;
 
 	// call addlinks after refresh to get links populated
 	gchar *link;
@@ -148,12 +149,12 @@ void mega_session_enable_previews(struct mega_session *s, gboolean enable);
 gboolean mega_session_open(struct mega_session *s, const gchar *un, const gchar *pw, const gchar *sid, GError **err);
 void mega_session_close(struct mega_session *s);
 const gchar *mega_session_get_sid(struct mega_session *s);
+const gchar *mega_session_get_user_name(struct mega_session *s);
 
 gboolean mega_session_save(struct mega_session *s, GError **err);
 // this has side effect of the current session being closed
 gboolean mega_session_load(struct mega_session *s, const gchar *un, const gchar *pw, gint max_age, gchar **last_sid,
 			   GError **err);
-const gchar* mega_session_get_user_name(struct mega_session *s);
 
 gboolean mega_session_get_user(struct mega_session *s, GError **err);
 gboolean mega_session_refresh(struct mega_session *s, GError **err);

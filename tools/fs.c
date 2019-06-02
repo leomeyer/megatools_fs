@@ -7,6 +7,7 @@
 
 #include "tools.h"
 #include "shell.h"
+#include "sjson.h"
 
 #include <fuse.h>
 #include <unistd.h>
@@ -30,6 +31,9 @@ static struct mega_session *s;
 
 #define Q(x) #x
 #define QUOTE(x) Q(x)
+
+#define _LOG_INFO(...)	if (tool_is_stdout_tty() && mega_debug & MEGA_DEBUG_APP) { g_print(__VA_ARGS__); g_print("\n"); } else syslog(LOG_INFO, __VA_ARGS__)
+#define _LOG_ERROR(...)	if (tool_is_stdout_tty()) { g_printerr(__VA_ARGS__); g_printerr("\n"); } else syslog(LOG_ERR, __VA_ARGS__)
 
 // append multiple -o or --options values, separated by comma
 static gboolean opt_mountoptions_callback(const gchar *option_name, const gchar *value, gpointer data, GError **error)
@@ -60,8 +64,7 @@ static void *mega_init(struct fuse_conn_info *conn)
 {
 	GError *local_err = NULL;
 
-	if (mega_debug & MEGA_DEBUG_APP)
-		syslog(LOG_INFO, QUOTE(TOOL_NAME) ": Initializing remote file system for mega user '%s' at mountpoint %s", mega_session_get_user_name(s), mountpoint_path);
+	_LOG_INFO(QUOTE(TOOL_NAME) ": Initializing remote file system for mega user '%s' at mountpoint %s", mega_session_get_user_name(s), mountpoint_path);
 
 	gc_free gchar* lock_file_path = g_build_filename(temp_folder_path, LOCKFILE_NAME, NULL);
 	gc_object_unref GFile *lock_file = g_file_new_for_path(lock_file_path);
@@ -69,7 +72,7 @@ static void *mega_init(struct fuse_conn_info *conn)
 	// create the lock file and write the current process ID to it
 	gc_object_unref GFileOutputStream *fos = g_file_create(lock_file, G_FILE_CREATE_NONE, NULL, &local_err);
 	if (!fos) {
-		syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Can't create lock file %s: %s\n", lock_file_path, local_err->message);
+		_LOG_ERROR(QUOTE(TOOL_NAME) ": Can't create lock file %s: %s\n", lock_file_path, local_err->message);
 		g_clear_error(&local_err);
 		exit(local_err->code);
 		return NULL;
@@ -77,14 +80,14 @@ static void *mega_init(struct fuse_conn_info *conn)
 
 	gsize bytes_written;
 	if (!g_output_stream_printf((GOutputStream*)fos, &bytes_written, NULL, &local_err, "%d", getpid())) {
-		syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Can't write to lock file %s: %s\n", lock_file_path, local_err->message);
+		_LOG_ERROR(QUOTE(TOOL_NAME) ": Can't write to lock file %s: %s\n", lock_file_path, local_err->message);
 		g_clear_error(&local_err);
 		exit(local_err->code);
 		return NULL;
 	}
 
 	if (!g_output_stream_close((GOutputStream*)fos, NULL, &local_err)) {
-		syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Error closing lock file %s: %s\n", lock_file_path, local_err->message);
+		_LOG_ERROR(QUOTE(TOOL_NAME) ": Error closing lock file %s: %s\n", lock_file_path, local_err->message);
 		g_clear_error(&local_err);
 		exit(local_err->code);
 		return NULL;
@@ -97,15 +100,14 @@ static void mega_destroy(void *private_data)
 {
 	GError *local_err = NULL;
 
-	if (mega_debug & MEGA_DEBUG_APP)
-		syslog(LOG_INFO, QUOTE(TOOL_NAME) ": Taking down remote file system for mega user '%s' at mountpoint %s", mega_session_get_user_name(s), opt_mountpoint);
+	_LOG_INFO(QUOTE(TOOL_NAME) ": Taking down remote file system for mega user '%s' at mountpoint %s", mega_session_get_user_name(s), opt_mountpoint);
 
 	gc_free gchar* lock_file_path = g_build_filename(temp_folder_path, LOCKFILE_NAME, NULL);
 	gc_object_unref GFile *lock_file = g_file_new_for_path(lock_file_path);
 
 	// delete the lock file
 	if (!g_file_delete(lock_file, NULL, &local_err)) {
-		syslog(LOG_ERR, QUOTE(TOOL_NAME) ": Can't delete lock file %s: %s\n", lock_file_path, local_err->message);
+		_LOG_ERROR(QUOTE(TOOL_NAME) ": Can't delete lock file %s: %s\n", lock_file_path, local_err->message);
 		g_clear_error(&local_err);
 	}
 }
@@ -181,7 +183,7 @@ static int mega_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 /*
 static int mega_releasedir(const char * c, struct fuse_file_info *fi) {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function releasedir: file %s", c);
+		_LOG_INFO("Call to unimplemented function releasedir: file %s", c);
 	return -ENOTSUP;
 }
 */
@@ -192,14 +194,14 @@ static int mega_releasedir(const char * c, struct fuse_file_info *fi) {
 static int mega_mkdir(const char *path, mode_t mode)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function mkdir: file %s", path);
+		_LOG_INFO("Call to unimplemented function mkdir: file %s", path);
 	return -ENOTSUP;
 }
 
 static int mega_rmdir(const char *path)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function rmdir: file %s", path);
+		_LOG_INFO("Call to unimplemented function rmdir: file %s", path);
 	return -ENOTSUP;
 }
 
@@ -209,21 +211,21 @@ static int mega_rmdir(const char *path)
 static int mega_symlink(const char *from, const char *to)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function symlink: file %s", from);
+		_LOG_INFO("Call to unimplemented function symlink: file %s", from);
 	return -ENOTSUP;
 }
 
 static int mega_readlink(const char *path, char *buf, size_t size)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function readlink: file %s", path);
+		_LOG_INFO("Call to unimplemented function readlink: file %s", path);
 	return -ENOTSUP;
 }
 
 static int mega_link(const char *from, const char *to)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function link: file %s", from);
+		_LOG_INFO("Call to unimplemented function link: file %s", from);
 	return -ENOTSUP;
 }
 
@@ -233,7 +235,7 @@ static int mega_link(const char *from, const char *to)
 static int mega_unlink(const char *path)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function unlink: file %s", path);
+		_LOG_INFO("Call to unimplemented function unlink: file %s", path);
 	return -ENOTSUP;
 }
 
@@ -243,7 +245,7 @@ static int mega_unlink(const char *path)
 static int mega_rename(const char *from, const char *to)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function rename: file %s", from);
+		_LOG_INFO("Call to unimplemented function rename: file %s", from);
 	return -ENOTSUP;
 }
 
@@ -253,7 +255,7 @@ static int mega_rename(const char *from, const char *to)
 static int mega_truncate(const char *path, off_t size)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function truncate: file %s", path);
+		_LOG_INFO("Call to unimplemented function truncate: file %s", path);
 	return -ENOTSUP;
 }
 */
@@ -262,11 +264,10 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
 {
 	GError *local_err = NULL;
 
-	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to function open: file %s", path);
+	_LOG_INFO("Call to function open: file %s, flags: %d", path, fi->flags);
 
 	gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
-	syslog(LOG_INFO, "Real path: %s", real_path);
+	_LOG_INFO("Real path: %s", real_path);
 
 	// find the node in the Mega tree
 	struct mega_node* n = mega_session_stat(s, path);
@@ -275,184 +276,280 @@ static int mega_open(const char *path, struct fuse_file_info *fi)
 	if (!n)
 		return -ENOENT;
 
-    syslog(LOG_INFO, "Node found");
+	_LOG_INFO("Node found");
 
-    // get effective timestamp
-    long int timestamp = (n->local_ts > 0 ? n->local_ts : n->timestamp);
+	// get effective timestamp
+	long int timestamp = (n->local_ts > 0 ? n->local_ts : n->timestamp);
 
 	gc_object_unref GFile* real_file = g_file_new_for_path(real_path);
 	// get temporary file information
 	GStatBuf st;
 	if (g_stat(real_path, &st) != 0) {
-        if (errno != ENOENT) {
-            syslog(LOG_ERR, "Failed to stat: %s: %s", real_path, g_strerror(errno));
-            return -errno;
-        }
-    } else {
+		if (errno != ENOENT) {
+			_LOG_ERROR("Failed to stat: %s: %s", real_path, g_strerror(errno));
+			return -errno;
+		}
+	} else {
 		// compare size
- 		syslog(LOG_INFO, "Comparing sizes: %zu (local) vs. %zu (remote)", (size_t)st.st_size, (size_t)n->size);
+		_LOG_INFO("Comparing sizes: %zu (local) vs. %zu (remote)", (size_t)st.st_size, (size_t)n->size);
 		gboolean do_replace = (st.st_size != n->size);
 
 		if (!do_replace) {
 			// compare timestamp
-			syslog(LOG_INFO, "Comparing timestamps: %lu (local) vs. %lu (remote)", st.st_mtime, timestamp);
+			_LOG_INFO("Comparing timestamps: %lu (local) vs. %lu (remote)", st.st_mtime, timestamp);
 			do_replace = (timestamp != st.st_mtime);
 		}
 
 		if (do_replace) {
-			syslog(LOG_INFO, "Deleting: %s", real_path);
+			_LOG_INFO("Deleting: %s", real_path);
 /*
-            // this code introduces a delay of 50 seconds if fuse_main is run without option "debug"
+			// this code introduces a delay of 50 seconds if fuse_main is run without option "debug"
 			if (!g_file_delete(real_file, NULL, &local_err)) {
-				syslog(LOG_ERR, "Can't delete temporary file %s: %s", real_path, local_err->message);
+				_LOG_ERROR("Can't delete temporary file %s: %s", real_path, local_err->message);
 				int code = local_err->code;
 				g_clear_error(&local_err);
 				return -1 * code;
 */
-            if (unlink(real_path) != 0) {
-                syslog(LOG_ERR, "Can't delete temporary file %s: %s", real_path, g_strerror(errno));
-                int code = errno;
-                return -1 * code;
-            } else {
-                syslog(LOG_INFO, "Successfully deleted: %s", real_path);
-            }
+			if (unlink(real_path) != 0) {
+				_LOG_ERROR("Can't delete temporary file %s: %s", real_path, g_strerror(errno));
+				int code = errno;
+				return -1 * code;
+			} else {
+				_LOG_INFO("Successfully deleted: %s", real_path);
+			}
 		}
 	}
 
-    syslog(LOG_INFO, "Checking file existence: %s", real_path);
+	_LOG_INFO("Checking file existence: %s", real_path);
 
 	// does the file not yet exist?
 	if (!g_file_query_exists(real_file, NULL)) {
-        // ensure that the path exists
-        syslog(LOG_INFO, "Checking/creating folder for: %s", real_path);
-        gc_object_unref GFile *real_folder = g_file_get_parent(real_file);
-        if (!g_file_make_directory_with_parents(real_folder, NULL, &local_err) && local_err->code != G_IO_ERROR_EXISTS) {
-            syslog(LOG_ERR, "Can't create target directory of %s: %s", real_path, local_err->message);
-            int code = local_err->code;
-            g_clear_error(&local_err);
-            return -1 * code;
-        }
-        g_clear_error(&local_err);
+		// ensure that the path exists
+		_LOG_INFO("Checking/creating folder for: %s", real_path);
+		gc_object_unref GFile *real_folder = g_file_get_parent(real_file);
+		if (!g_file_make_directory_with_parents(real_folder, NULL, &local_err) && local_err->code != G_IO_ERROR_EXISTS) {
+			_LOG_ERROR("Can't create target directory of %s: %s", real_path, local_err->message);
+			int code = local_err->code;
+			g_clear_error(&local_err);
+			return -1 * code;
+		}
+		g_clear_error(&local_err);
 
-        // need to download the file
+		// need to download the file
 
-        syslog(LOG_INFO, "Checking space on temporary file system: %s", temp_folder_path);
-        // check space on temp folder fs
-        struct statvfs stfs;
-        if (statvfs(temp_folder_path, &stfs) != 0) {
-            syslog(LOG_ERR, "Error in statvfs: %d", errno);
-            return -EIO;
-        }
+		_LOG_INFO("Checking space on temporary file system: %s", temp_folder_path);
+		// check space on temp folder fs
+		struct statvfs stfs;
+		if (statvfs(temp_folder_path, &stfs) != 0) {
+			_LOG_ERROR("Error in statvfs: %d", errno);
+			return -EIO;
+		}
 
-        long int free_bytes = stfs.f_bavail * stfs.f_bsize;
-        syslog(LOG_INFO, "Available space in temporary folder: %lu bytes", free_bytes);
+		long int free_bytes = stfs.f_bavail * stfs.f_bsize;
+		_LOG_INFO("Available space in temporary folder: %lu bytes", free_bytes);
 
-        if (free_bytes < n->size) {
-            long int diff = n->size - free_bytes;
-            syslog(LOG_ERR, "Not enough space in temp folder %s for %s, %lu bytes short", temp_folder_path, path, diff);
-            return -ENOSPC;
-        }
+		if (free_bytes < n->size) {
+			long int diff = n->size - free_bytes;
+			_LOG_ERROR("Not enough space in temp folder %s for %s, %lu bytes short", temp_folder_path, path, diff);
+			return -ENOSPC;
+		}
 
-        syslog(LOG_INFO, "Downloading: %s (%zu bytes)", path, (size_t)n->size);
-        if (!mega_session_get_compat(s, real_path, path, &local_err)) {
-            syslog(LOG_ERR, "Download failed for %s: %s", path, local_err->message);
-            int code = local_err->code;
-            g_clear_error(&local_err);
-            return -1 * code;
-        }
+		_LOG_INFO("Downloading: %s (%zu bytes)", path, (size_t)n->size);
+		if (!mega_session_get_compat(s, real_path, path, &local_err)) {
+			_LOG_ERROR("Download failed for %s: %s", path, local_err->message);
+			int code = local_err->code;
+			g_clear_error(&local_err);
+			return -1 * code;
+		}
 
-        // set timestamp
-        if (timestamp > 0) {
-            struct utimbuf timbuf;
-            timbuf.actime = timestamp;
-            timbuf.modtime = timestamp;
-            if (utime(real_path, &timbuf)) {
-                syslog(LOG_ERR, "Failed to set file times on %s: %s", real_path, g_strerror(errno));
-            }
-        }
+		// set timestamp
+		if (timestamp > 0) {
+			struct utimbuf timbuf;
+			timbuf.actime = timestamp;
+			timbuf.modtime = timestamp;
+			if (utime(real_path, &timbuf)) {
+				_LOG_ERROR("Failed to set file times on %s: %s", real_path, g_strerror(errno));
+			}
+		}
 
-        syslog(LOG_INFO, "File successfully downloaded: %s", path);
+		_LOG_INFO("File successfully downloaded: %s", path);
 	} else {
-        syslog(LOG_INFO, "Opening file in temporary folder: %s", real_path);        
-    }
+		_LOG_INFO("Opening file in temporary folder: %s", real_path);        
+	}
 
-    // open the file
-    int retstat = 0;
-    int fd;
-    
-    fd = open(real_path, fi->flags);
-    if (fd < 0) {
-        syslog(LOG_ERR, "Unable to open file %s: %s", real_path, g_strerror(errno));
-        retstat = errno;
-    } else {
-        fi->fh = fd;
-        syslog(LOG_INFO, "File handle %d created for: %s", fd, path);
-    }
+	// open the file
+	int retstat = 0;
+	int fd;
+	
+	fd = open(real_path, fi->flags);
+	if (fd < 0) {
+		_LOG_ERROR("Unable to open file %s: %s", real_path, g_strerror(errno));
+		retstat = errno;
+	} else {
+		fi->fh = fd;
+		_LOG_INFO("File handle %d created for: %s", fd, path);
+	}
 
-    return retstat;
+	return retstat;
 }
 /*
 static int mega_read_buf(const char * path, struct fuse_bufvec **bufp, size_t size, off_t offset, struct fuse_file_info *fi) {
-    if (mega_debug & MEGA_DEBUG_APP)
-        syslog(LOG_INFO, "mega_read_buf: file %s at offset %lu (size %ld)", path, offset, size);
+	_LOG_INFO("mega_read_buf: file %s at offset %lu (size %ld)", path, offset, size);
 
-    struct fuse_bufvec *src;
-    src = malloc(sizeof(struct fuse_bufvec));
-    if (src == NULL)
-        return -ENOMEM;
+	struct fuse_bufvec *src;
+	src = malloc(sizeof(struct fuse_bufvec));
+	if (src == NULL)
+		return -ENOMEM;
 
-    *src = FUSE_BUFVEC_INIT(size);
-    src->buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
-    src->buf[0].fd = fi->fh;
-    src->buf[0].pos = offset;
+	*src = FUSE_BUFVEC_INIT(size);
+	src->buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+	src->buf[0].fd = fi->fh;
+	src->buf[0].pos = offset;
 
-    int retstat = 0;
-    
-    retstat = pread(fi->fh, src->buf, size, offset);
-    if (retstat < 0) {
-        retstat = -errno;
-        gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
-        syslog(LOG_ERR, "Unable to read file %s: %s", real_path, g_strerror(errno));
-    }
+	int retstat = 0;
+	
+	retstat = pread(fi->fh, src->buf, size, offset);
+	if (retstat < 0) {
+		retstat = -errno;
+		gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
+		_LOG_ERROR("Unable to read file %s: %s", real_path, g_strerror(errno));
+	}
 
-    *bufp = src;
+	*bufp = src;
 
-    return retstat;
+	return retstat;
 }
 */
 
 static int mega_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-	if (mega_debug & MEGA_DEBUG_APP)
-		syslog(LOG_INFO, "mega_read: file %s at offset %jd (size %zu)", path, offset, size);
+	_LOG_INFO("mega_read: file %s at offset %jd (size %zu)", path, offset, size);
 
-    int retstat = 0;
+	int retstat = 0;
 
-    retstat = pread(fi->fh, buf, size, offset);
-    if (retstat < 0) {
-        gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
-        syslog(LOG_ERR, "Unable to read file %s: %s", real_path, g_strerror(errno));
-        return -errno;
-    }
+	retstat = pread(fi->fh, buf, size, offset);
+	if (retstat < 0) {
+		gc_free gchar* real_path = g_build_filename(temp_folder_path, path, NULL);
+		_LOG_ERROR("Unable to read file %s: %s", real_path, g_strerror(errno));
+		return -errno;
+	}
 
-    return retstat;
+	return retstat;
 }
 /*
 static int mega_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
 	if (opt_log_unimplemented)
-		syslog(LOG_INFO, "Call to unimplemented function write: file %s", path);
+		_LOG_INFO("Call to unimplemented function write: file %s", path);
 	return -ENOTSUP;
 }
 */
 static int mega_release(const char *path, struct fuse_file_info *fi)
 {
-	if (mega_debug & MEGA_DEBUG_APP)
-		syslog(LOG_INFO, "mega_release: file %s", path);
+	_LOG_INFO("mega_release: file %s", path);
 
-    close(fi->fh);
+	close(fi->fh);
 
 	return -errno;
+}
+
+static int mega_getxattr(const char *path, const char *name, char *value, size_t size) {
+	_LOG_INFO("Call to function getxattr: file %s, attr: %s, size: %zu", path, name, size);
+
+	// find the node in the Mega tree
+	struct mega_node* n = mega_session_stat(s, path);
+
+	// node not found?
+	if (!n)
+		return -ENOENT;
+
+	if (!n->xattrs) {
+		return -ENODATA;
+	}
+
+	const gchar *xattrs_node = s_json_get_member(n->xattrs, "xattrs");
+	if (xattrs_node && s_json_get_type(xattrs_node) == S_JSON_TYPE_ARRAY) {
+		gc_free gchar** f_elems = s_json_get_elements(xattrs_node);
+		gchar** f_elem = f_elems;
+
+		while (*f_elem) {
+			if (s_json_get_type(*f_elem) == S_JSON_TYPE_OBJECT) {
+				gc_free gchar *xattr_name = s_json_get_member_string(*f_elem, "n");
+				if (!strcmp(name, xattr_name)) {
+					gc_free gchar *xattr_value_encoded = s_json_get_member_string(*f_elem, "v");
+					gsize value_len;
+					guchar* xattr_value = g_base64_decode(xattr_value_encoded, &value_len);
+					if (size > 0) {
+						if (value_len > size)
+							return -ERANGE;
+						memcpy(value, xattr_value, value_len);
+					}
+					g_free(xattr_value);
+					return value_len;
+				}
+			}
+
+			f_elem++;
+		}
+	}
+
+	_LOG_INFO("%s:Extended attribute not found\n", path);
+
+	return -ENODATA;
+}
+
+static int mega_listxattr(const char *path, char *list, size_t size) {
+	_LOG_INFO("Call to function listxattr: file %s, size: %zu", path, size);
+
+	// find the node in the Mega tree
+	struct mega_node* n = mega_session_stat(s, path);
+
+	// node not found?
+	if (!n)
+		return -ENOENT;
+
+	if (!n->xattrs) {
+		// no data available (covers size = 0 as well)
+		return 0;
+	}
+
+	int attr_count = 0;
+	off_t offset = 0;
+
+	const gchar *xattrs_node = s_json_get_member(n->xattrs, "xattrs");
+	if (xattrs_node && s_json_get_type(xattrs_node) == S_JSON_TYPE_ARRAY) {
+		gc_free gchar** f_elems = s_json_get_elements(xattrs_node);
+		gchar** f_elem = f_elems;
+		gc_free gchar* debug_str = calloc(1, size);
+
+		while (*f_elem) {
+			if (s_json_get_type(*f_elem) == S_JSON_TYPE_OBJECT) {
+				gc_free gchar *xattr_name = s_json_get_member_string(*f_elem, "n");
+				size_t len;
+				if (xattr_name && (len = strlen(xattr_name)) > 0) {
+					if (size > 0) {
+						// buffer too small?
+						if (offset + len + 1 > size)
+							return -ERANGE;
+						g_strlcpy(&(list[offset]), xattr_name, size - offset);
+						g_strlcpy(&(debug_str[offset]), xattr_name, size - offset);
+						debug_str[offset + len] = ' ';
+					}
+					offset += len + 1;
+					attr_count++;
+					_LOG_INFO("%s: Found extended attribute: %s\n", path, xattr_name);
+				}
+			}
+
+			f_elem++;
+		}
+
+		_LOG_INFO("%s: Found %d extended attributes: %s\n", path, attr_count, debug_str);
+	} else {
+		_LOG_INFO("%s: No extended attributes found\n", path);
+	}
+
+	return offset;
 }
 
 // }}}
@@ -467,8 +564,9 @@ static int mega_release(const char *path, struct fuse_file_info *fi)
 #define UNIMPLEMENTED(rettype, fn, ...) \
 static rettype CONCAT(mega_, fn) (__VA_ARGS__) \
 { \
-	if (opt_log_unimplemented) \
-		syslog(LOG_INFO, "Call to unimplemented function " #fn); \
+	if (opt_log_unimplemented) {\
+		_LOG_INFO("Call to unimplemented function " #fn); \
+	} \
 	RETVAL(rettype) \
 }
 /*
@@ -485,10 +583,6 @@ UNIMPLEMENTED(int, chown, const char * c, uid_t u, gid_t g)
 UNIMPLEMENTED(int, fsync, const char * c, int i, struct fuse_file_info *fi)
 
 UNIMPLEMENTED(int, setxattr, const char * c, const char * c1, const char * c2, size_t size, int i)
- 
-UNIMPLEMENTED(int, getxattr, const char * c, const char * c1, char * c2, size_t size)
-
-UNIMPLEMENTED(int, listxattr, const char * c, char * c1, size_t size)
  
 UNIMPLEMENTED(int, removexattr, const char * c, const char * c1)
 
@@ -539,8 +633,8 @@ static struct fuse_operations mega_oper = {
 	.release	= mega_release,
 //	.fsync      = mega_fsync,
 //	.setxattr   = mega_setxattr,
-//	.getxattr   = mega_getxattr,
-//	.listxattr  = mega_listxattr,
+	.getxattr   = mega_getxattr,
+	.listxattr  = mega_listxattr,
 //	.removexattr = mega_removexattr,
 //    .opendir    = mega_opendir,
 	.readdir	= mega_readdir,
