@@ -2110,6 +2110,10 @@ static void mega_node_free(struct mega_node *n)
 		g_free(n->user_handle);
 		g_free(n->su_handle);
 		g_free(n->key);
+		if (n->xattrs != NULL) {
+			memset(n->xattrs, 0, strlen(n->xattrs));
+			free(n->xattrs);
+		}
 		g_free(n->link);
 		memset(n, 0, sizeof(struct mega_node));
 		g_free(n);
@@ -4164,24 +4168,24 @@ try_again:
 
 	// store extended file attributes
 	gc_free gchar *xattrs = NULL;
-	#define XATTR_SIZE	10000
-	char xattr_list[XATTR_SIZE];
-	char xattr_value[XATTR_SIZE];
-	ssize_t list_len = listxattr(local_path, xattr_list, XATTR_SIZE);
+	#define XATTR_MAX_SIZE	65535
+	char xattr_list[XATTR_MAX_SIZE];
+	char xattr_value[XATTR_MAX_SIZE];
+	ssize_t list_len = listxattr(local_path, xattr_list, XATTR_MAX_SIZE);
 	if (list_len > 0) {
-		// serialize extended attributes
+		// serialize extended attributes as json
 		SJsonGen *gen = s_json_gen_new();
 		s_json_gen_start_object(gen);
 		s_json_gen_member_array(gen, "xattrs");
 
 		int li;
 		for (li = 0; li < list_len; li += strlen(&xattr_list[li]) + 1) {
-			ssize_t value_len = getxattr(local_path, &xattr_list[li], xattr_value, XATTR_SIZE);
+			ssize_t value_len = getxattr(local_path, &xattr_list[li], xattr_value, XATTR_MAX_SIZE);
 			if (value_len > -1) {
 				s_json_gen_start_object(gen);
-				s_json_gen_member_string(gen, "n", &xattr_list[li]);
+				s_json_gen_member_string(gen, "n", &xattr_list[li]);	// xattr name
 				gc_free gchar* value_encoded = g_base64_encode(xattr_value, value_len);
-				s_json_gen_member_string(gen, "v", value_encoded);
+				s_json_gen_member_string(gen, "v", value_encoded);		// xattr value as base64
 				s_json_gen_end_object(gen);
 			}
 		}
